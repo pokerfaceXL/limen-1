@@ -251,6 +251,7 @@ export function argvFor(profile: EngineProfile, slots: EngineArgv): string[] {
 	const named = [
 		...slots.extensions,
 		...(bridge ? [bridge] : []),
+		...(profile.id === "pi" ? installedPiPackages() : []),
 		...(slots.jsonMode ? [] : herdrStateExtensions(profile)),
 	];
 	const seen = new Set<string>();
@@ -303,6 +304,20 @@ export function engineRoute(
 
 // `--no-extensions` hides the bridge. Name it explicitly so the model resolves while other user
 // extensions stay off. OMP loads its local port; Pi loads the bridge package it installed, scoped or not.
+// MRL local: `--no-extensions` also drops user-installed provider packages (claude-bridge, cursor).
+// Re-add every package `pi list` reports, by realpath so the dedup above skips the pi-claude bridge.
+function installedPiPackages(): string[] {
+	const listing = spawnSync(engineBinary(ENGINES.pi), ["list"], { encoding: "utf8" });
+	if (listing.status !== 0 || !listing.stdout) {
+		return [];
+	}
+	return listing.stdout
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((dir) => dir.startsWith("/") && existsSync(join(dir, "package.json")))
+		.map((dir) => realpathSync(dir));
+}
+
 function bridgePath(profile: EngineProfile): string | undefined {
 	let candidates = [join(homedir(), ".omp", "local", "pi-claude-bridge")];
 	if (profile.id === "pi") {

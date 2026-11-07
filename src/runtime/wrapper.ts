@@ -35,7 +35,10 @@ const HOOK = fileURLToPath(new URL("../../hook", import.meta.url));
 // A job is one short turn. These bounds stop a silent runaway from burning a session; they are not a review gate.
 const DEFAULT_TIMEOUT_MS = 90 * 60_000;
 const MAX_TOOL_CALLS = 900;
-const toolCallCap = (): number => Number(process.env.LIMEN_MAX_TOOL_CALLS) || MAX_TOOL_CALLS;
+// MRL local: with LIMEN_AGENT_BUDGET_POLICY=progress the project bounds work by progress, not by a timer or tool count.
+const progressMode = (): boolean => process.env.LIMEN_AGENT_BUDGET_POLICY === "progress";
+// biome-ignore format: one line keeps the MRL patch fixture readable
+const toolCallCap = (): number => progressMode() ? Number.POSITIVE_INFINITY : Number(process.env.LIMEN_MAX_TOOL_CALLS) || MAX_TOOL_CALLS;
 export async function launchWrapper(environment: Readonly<Record<string, string>>): Promise<number> {
 	return launchDetached({ ...environment, LIMEN_INTERNAL_RUN: "1" });
 }
@@ -344,10 +347,11 @@ export async function runInternalJob(): Promise<void> {
 			});
 	};
 	const stallTimer = setInterval(checkStall, 3_000);
-	const timeout = setTimeout(() => exhaust(`timeout after ${timeoutMs}ms`), timeoutMs);
+	const untimed = progressMode() && !membership;
+	const timeout = untimed ? undefined : setTimeout(() => exhaust(`timeout after ${timeoutMs}ms`), timeoutMs);
 	// A model cannot see the clock; one steer at 80% lets it leave a commit or a verdict before the timeout.
 	const steerAt = Math.round(timeoutMs * 0.8);
-	const deadlineSteer = setTimeout(() => {
+	const deadlineSteer = untimed ? undefined : setTimeout(() => {
 		if (exhausted || stopRequested) {
 			return;
 		}
