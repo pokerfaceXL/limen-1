@@ -171,8 +171,7 @@ export function commitHasFile(cwd: string, commit: string, path: string): boolea
 	return git(cwd, ["cat-file", "-t", `${commit}:${path}`]).stdout.trim() === "blob";
 }
 export function listWorktrees(cwd: string): readonly GitWorktree[] {
-	// MRL local: git 2.34 on this seat has no `worktree list -z`; newline porcelain carries the same fields.
-	const fields = requireGit(cwd, ["worktree", "list", "--porcelain"]).stdout.split("\n");
+	const fields = requireGit(cwd, ["worktree", "list", "--porcelain", "-z"]).stdout.split("\0");
 	const worktrees: GitWorktree[] = [];
 	let path: string | undefined;
 	let branch: string | undefined;
