@@ -29,6 +29,10 @@ import { createStreamParser, type StreamEvent } from "./stream.ts";
 import { readWorkerExtensions } from "./worker-extensions.ts";
 
 const STOP_GRACE_MS = 5_000;
+// MRL local: `finish` writes session-ended and asks the engine to exit. An engine that stays up after that (Pi on
+// cursor/auto, 2026-11-08: 20-58 min) would hold the job running with no timeout under the progress policy.
+const FINISH_EXIT_MS = 120_000;
+const finishExitMs = (): number => Number(process.env.LIMEN_FINISH_EXIT_MS) || FINISH_EXIT_MS;
 // Coordinators and the picture watch the job folder; a streamed delta must not rewrite the same word many times a second.
 const ACTIVITY_REFRESH_MS = 1_000;
 const HOOK = fileURLToPath(new URL("../../hook", import.meta.url));
@@ -347,6 +351,38 @@ export async function runInternalJob(): Promise<void> {
 			});
 	};
 	const stallTimer = setInterval(checkStall, 3_000);
+	let finishedHang: string | undefined;
+	let finishedTermination = Promise.resolve();
+	let finishChecking = false;
+	const checkFinished = () => {
+		if (finishChecking || finishedHang || exhausted || stopRequested) {
+			return;
+		}
+		finishChecking = true;
+		void textFile(`${jobDir}/session-ended`)
+			.then((ended) => {
+				const endedMs = ended ? Date.parse(ended) || Date.now() : 0;
+				if (!endedMs || finishedHang || exhausted || stopRequested || Date.now() - endedMs < finishExitMs()) {
+					return;
+				}
+				finishedHang = `finished; engine still running ${Math.round((Date.now() - endedMs) / 1000)}s after finish`;
+				const reason = finishedHang;
+				finishedTermination = (async () => {
+					const descendants = await discoverEscapedDescendants(jobDir, process.pid, "after finish");
+					await appendLimenLog(jobDir, `${reason}; sending TERM`).catch(() => {});
+					shutdownDeadline = Date.now() + STOP_GRACE_MS - 500;
+					signalProcessGroup(process.pid, "SIGTERM");
+					graceTimer = setTimeout(() => signalProcessGroup(process.pid, "SIGKILL"), STOP_GRACE_MS);
+					graceTimer.unref();
+					await containEscapedDescendants(jobDir, descendants, "after finish").catch(() => {});
+				})();
+			})
+			.catch(failLog)
+			.finally(() => {
+				finishChecking = false;
+			});
+	};
+	const finishTimer = setInterval(checkFinished, 3_000);
 	const untimed = progressMode() && !membership;
 	const timeout = untimed ? undefined : setTimeout(() => exhaust(`timeout after ${timeoutMs}ms`), timeoutMs);
 	// A model cannot see the clock; one steer at 80% lets it leave a commit or a verdict before the timeout.
@@ -363,6 +399,7 @@ export async function runInternalJob(): Promise<void> {
 	clearTimeout(timeout);
 	clearTimeout(deadlineSteer);
 	clearInterval(stallTimer);
+	clearInterval(finishTimer);
 	if (graceTimer) {
 		clearTimeout(graceTimer);
 	}
@@ -374,6 +411,12 @@ export async function runInternalJob(): Promise<void> {
 	}
 	if (exhausted) {
 		await exhaustionTermination;
+	} else if (finishedHang) {
+		await finishedTermination;
+		if (seen.assistant && !(await textFile(`${jobDir}/result`))) {
+			await atomicWrite(`${jobDir}/result`, `${seen.assistant}\n`).catch(() => {});
+		}
+		await finalizeJob(jobDir, "done", finishedHang, shutdownDeadline);
 	} else if (stopRequested || result.signal === "SIGTERM" || result.signal === "SIGKILL") {
 		await finalizeJob(jobDir, "stopped", "process group interrupted", shutdownDeadline);
 	} else if (result.error) {
